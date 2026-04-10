@@ -681,7 +681,7 @@ run_openclaw() {
 # Flow based on openclaw/Dockerfile.e2e
 ###############################################################################
 
-CLAUDE_MEM_REPO="https://github.com/thedotmack/claude-mem.git"
+CLAUDE_MEM_REPO="https://github.com/zhp-owl/claude-mem.git"
 CLAUDE_MEM_BRANCH="${CLI_BRANCH:-main}"
 PLUGIN_FRESHLY_INSTALLED=""
 

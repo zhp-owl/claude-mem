@@ -2,7 +2,7 @@
 
 <h1 align="center">
   <br>
-  <a href="https://github.com/thedotmack/claude-mem">
+  <a href="https://github.com/zhp-owl/claude-mem">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/claude-mem-logo-for-dark-mode.webp">
       <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/claude-mem-logo-for-light-mode.webp">
@@ -57,7 +57,7 @@
   <a href="package.json">
     <img src="https://img.shields.io/badge/node-%3E%3D18.0.0-brightgreen.svg" alt="Node">
   </a>
-  <a href="https://github.com/thedotmack/awesome-claude-code">
+  <a href="https://github.com/zhp-owl/awesome-claude-code">
     <img src="https://awesome.re/mentioned-badge.svg" alt="Mentioned in Awesome Claude Code">
   </a>
 </p>
@@ -75,7 +75,7 @@
 <br>
 
 <p align="center">
-  <a href="https://github.com/thedotmack/claude-mem">
+  <a href="https://github.com/zhp-owl/claude-mem">
     <picture>
       <img src="https://raw.githubusercontent.com/thedotmack/claude-mem/main/docs/public/cm-preview.gif" alt="Claude-Mem Preview" width="800">
     </picture>
@@ -294,8 +294,8 @@ Copyright (C) 2025 Alex Newman (@thedotmack) สงวนลิขสิทธ�
 ## การสนับสนุน
 
 - **เอกสาร**: [docs/](docs/)
-- **ปัญหา**: [GitHub Issues](https://github.com/thedotmack/claude-mem/issues)
-- **Repository**: [github.com/thedotmack/claude-mem](https://github.com/thedotmack/claude-mem)
+- **ปัญหา**: [GitHub Issues](https://github.com/zhp-owl/claude-mem/issues)
+- **Repository**: [github.com/thedotmack/claude-mem](https://github.com/zhp-owl/claude-mem)
 - **ผู้เขียน**: Alex Newman ([@thedotmack](https://github.com/thedotmack))
 
 ---

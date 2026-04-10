@@ -39,7 +39,7 @@ const CONTEXT_GENERATOR = {
  * This post-build step removes those hardcoded assignments so the runtime
  * globals are used instead.
  *
- * See: https://github.com/thedotmack/claude-mem/issues/1410
+ * See: https://github.com/zhp-owl/claude-mem/issues/1410
  */
 function stripHardcodedDirname(filePath) {
   let content = fs.readFileSync(filePath, 'utf-8');
