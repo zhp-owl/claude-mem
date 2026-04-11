@@ -344,7 +344,6 @@ export class OpenAIAgent {
         model,
         messages,
         temperature: 0.3,
-        max_tokens: 4096,
       }),
     });
 

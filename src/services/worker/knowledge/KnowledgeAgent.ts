@@ -9,7 +9,7 @@
  * Knowledge agents are Q&A only - all 12 tools are blocked.
  */
 
-import { execSync } from 'child_process';
+import { execSync, spawn } from 'child_process';
 import { CorpusStore } from './CorpusStore.js';
 import { CorpusRenderer } from './CorpusRenderer.js';
 import type { CorpusFile, QueryResult } from './types.js';
@@ -79,6 +79,7 @@ export class KnowledgeAgent {
         cwd: OBSERVER_SESSIONS_DIR,
         disallowedTools: KNOWLEDGE_AGENT_DISALLOWED_TOOLS,
         pathToClaudeCodeExecutable: claudePath,
+        spawnClaudeCodeProcess: this.createSpawnFunction(),
         env: isolatedEnv
       }
     });
@@ -186,6 +187,7 @@ export class KnowledgeAgent {
         cwd: OBSERVER_SESSIONS_DIR,
         disallowedTools: KNOWLEDGE_AGENT_DISALLOWED_TOOLS,
         pathToClaudeCodeExecutable: claudePath,
+        spawnClaudeCodeProcess: this.createSpawnFunction(),
         env: isolatedEnv
       }
     });
@@ -217,11 +219,56 @@ export class KnowledgeAgent {
   }
 
   /**
-   * Get model ID from user settings — same as SDKAgent.getModelId()
+   * Create a spawn function that wraps .cmd files in cmd.exe on Windows.
+   * Mirrors the fix in ProcessRegistry.createPidCapturingSpawn for KnowledgeAgent.
+   */
+  private createSpawnFunction() {
+    return (spawnOptions: {
+      command: string;
+      args: string[];
+      cwd?: string;
+      env?: NodeJS.ProcessEnv;
+      signal?: AbortSignal;
+    }) => {
+      const useCmdWrapper = process.platform === 'win32' && spawnOptions.command.endsWith('.cmd');
+      const child = useCmdWrapper
+        ? spawn('cmd.exe', ['/d', '/c', spawnOptions.command, ...spawnOptions.args], {
+            cwd: spawnOptions.cwd,
+            env: spawnOptions.env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            signal: spawnOptions.signal,
+            windowsHide: true
+          })
+        : spawn(spawnOptions.command, spawnOptions.args, {
+            cwd: spawnOptions.cwd,
+            env: spawnOptions.env,
+            stdio: ['pipe', 'pipe', 'pipe'],
+            signal: spawnOptions.signal,
+            windowsHide: true
+          });
+
+      return {
+        stdin: child.stdin,
+        stdout: child.stdout,
+        stderr: child.stderr,
+        get killed() { return child.killed; },
+        get exitCode() { return child.exitCode; },
+        kill: child.kill.bind(child),
+        on: child.on.bind(child),
+        once: child.once.bind(child),
+        off: child.off.bind(child)
+      };
+    };
+  }
+
+  /**
+   * Get model ID for knowledge agents.
+   * Uses CLAUDE_MEM_KNOWLEDGE_MODEL (default: 'haiku') to avoid thinking-block
+   * signature errors on Azure/Bedrock/Vertex when using extended-thinking models.
    */
   private getModelId(): string {
     const settings = SettingsDefaultsManager.loadFromFile(USER_SETTINGS_PATH);
-    return settings.CLAUDE_MEM_MODEL;
+    return settings.CLAUDE_MEM_KNOWLEDGE_MODEL || settings.CLAUDE_MEM_MODEL;
   }
 
   /**

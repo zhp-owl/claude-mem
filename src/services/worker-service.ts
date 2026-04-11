@@ -1100,6 +1100,20 @@ async function main() {
 
     case 'restart': {
       logger.info('SYSTEM', 'Restarting worker');
+
+      // Kill the worker process by PID first (before HTTP shutdown) so the
+      // restart doesn't hang if the HTTP endpoint is unresponsive.
+      const pidInfoForRestart = readPidFile();
+      if (pidInfoForRestart) {
+        try {
+          process.kill(pidInfoForRestart.pid, 'SIGTERM');
+          logger.info('SYSTEM', 'Sent SIGTERM to worker process', { pid: pidInfoForRestart.pid });
+        } catch (killError) {
+          // ENOENT / ESRCH = already dead; anything else is unexpected but non-fatal
+          logger.debug('SYSTEM', 'SIGTERM to worker PID failed (process may already be gone)', { pid: pidInfoForRestart.pid }, killError as Error);
+        }
+      }
+
       await httpShutdown(port);
       const restartFreed = await waitForPortFree(port, getPlatformTimeout(15000));
       if (!restartFreed) {

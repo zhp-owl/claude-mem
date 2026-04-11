@@ -469,7 +469,17 @@ NEVER fetch full details without filtering first. 10x token savings.`,
       additionalProperties: true
     },
     handler: async (args: any) => {
-      return await callWorkerAPI('/api/corpus', args);
+      const data = await callWorkerAPI('/api/corpus', args);
+      // Worker returns a bare array; MCP requires an object result
+      if (Array.isArray(data)) {
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify(data, null, 2)
+          }]
+        };
+      }
+      return data;
     }
   },
   {

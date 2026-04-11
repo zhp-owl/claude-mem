@@ -7,7 +7,7 @@
  */
 
 const { execSync } = require('child_process');
-const { existsSync, readFileSync } = require('fs');
+const { existsSync, readFileSync, readdirSync, statSync, mkdirSync, copyFileSync, rmSync } = require('fs');
 const path = require('path');
 const os = require('os');
 
@@ -29,16 +29,101 @@ function getCurrentBranch() {
   }
 }
 
-function getGitignoreExcludes(basePath) {
+function getGitignorePatterns(basePath) {
   const gitignorePath = path.join(basePath, '.gitignore');
-  if (!existsSync(gitignorePath)) return '';
+  if (!existsSync(gitignorePath)) return [];
 
   const lines = readFileSync(gitignorePath, 'utf-8').split('\n');
   return lines
     .map(line => line.trim())
-    .filter(line => line && !line.startsWith('#') && !line.startsWith('!'))
-    .map(pattern => `--exclude=${JSON.stringify(pattern)}`)
-    .join(' ');
+    .filter(line => line && !line.startsWith('#') && !line.startsWith('!'));
+}
+
+function matchesPattern(normalizedRel, pattern) {
+  // Strip trailing slash (directory indicator in gitignore)
+  const p = pattern.replace(/\/$/, '');
+
+  // Build regex from glob pattern
+  const regexStr = p
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '\x00')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\x00/g, '.*');
+
+  // Pattern without slash matches any path component
+  if (!p.includes('/')) {
+    return new RegExp(`(^|/)${regexStr}(/|$)`).test(normalizedRel);
+  }
+  // Pattern with slash matches from root
+  return new RegExp(`^${regexStr}(/.*)?$`).test(normalizedRel);
+}
+
+function shouldExclude(relPath, excludePatterns) {
+  const normalized = relPath.replace(/\\/g, '/');
+  return excludePatterns.some(p => matchesPattern(normalized, p));
+}
+
+/**
+ * Cross-platform directory sync (equivalent to rsync -av --delete --exclude=...).
+ * Does NOT delete excluded items in the destination (mirrors rsync default --delete behavior).
+ */
+function syncDirectories(src, dest, excludePatterns = []) {
+  if (!existsSync(dest)) {
+    mkdirSync(dest, { recursive: true });
+  }
+
+  const srcFiles = new Set();
+
+  function walkAndCopy(dir, relBase) {
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+    for (const entry of entries) {
+      const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+      if (shouldExclude(rel, excludePatterns)) continue;
+
+      const srcPath = path.join(dir, entry.name);
+      const destPath = path.join(dest, rel);
+
+      if (entry.isDirectory()) {
+        srcFiles.add(rel);
+        if (!existsSync(destPath)) mkdirSync(destPath, { recursive: true });
+        walkAndCopy(srcPath, rel);
+      } else if (entry.isFile()) {
+        srcFiles.add(rel);
+        let needsCopy = true;
+        if (existsSync(destPath)) {
+          const ss = statSync(srcPath), ds = statSync(destPath);
+          needsCopy = ss.size !== ds.size || ss.mtimeMs > ds.mtimeMs;
+        }
+        if (needsCopy) {
+          mkdirSync(path.dirname(destPath), { recursive: true });
+          copyFileSync(srcPath, destPath);
+        }
+      }
+    }
+  }
+
+  walkAndCopy(src, '');
+
+  // Delete dest items not present in src (mirrors --delete), skip excluded items
+  function walkAndDelete(dir, relBase) {
+    if (!existsSync(dir)) return;
+    let entries;
+    try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
+
+    for (const entry of entries) {
+      const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+      if (shouldExclude(rel, excludePatterns)) continue;
+      if (!srcFiles.has(rel)) {
+        rmSync(path.join(dest, rel), { recursive: true, force: true });
+      } else if (entry.isDirectory()) {
+        walkAndDelete(path.join(dir, entry.name), rel);
+      }
+    }
+  }
+
+  walkAndDelete(dest, '');
 }
 
 const branch = getCurrentBranch();
@@ -47,12 +132,12 @@ const isForce = process.argv.includes('--force');
 if (branch && branch !== 'main' && !isForce) {
   console.log('');
   console.log('\x1b[33m%s\x1b[0m', `WARNING: Installed plugin is on beta branch: ${branch}`);
-  console.log('\x1b[33m%s\x1b[0m', 'Running rsync would overwrite beta code.');
+  console.log('\x1b[33m%s\x1b[0m', 'Running sync would overwrite beta code.');
   console.log('');
   console.log('Options:');
   console.log('  1. Use UI at http://localhost:37777 to update beta');
   console.log('  2. Switch to stable in UI first, then run sync');
-  console.log('  3. Force rsync: npm run sync-marketplace:force');
+  console.log('  3. Force sync: npm run sync-marketplace:force');
   console.log('');
   process.exit(1);
 }
@@ -69,35 +154,28 @@ function getPluginVersion() {
   }
 }
 
-// Normal rsync for main branch or fresh install
+// Normal sync for main branch or fresh install
 console.log('Syncing to marketplace...');
 try {
   const rootDir = path.join(__dirname, '..');
-  const gitignoreExcludes = getGitignoreExcludes(rootDir);
+  const gitignorePatterns = getGitignorePatterns(rootDir);
+  const mainExcludes = ['.git', 'bun.lock', 'package-lock.json', ...gitignorePatterns];
 
-  execSync(
-    `rsync -av --delete --exclude=.git --exclude=bun.lock --exclude=package-lock.json ${gitignoreExcludes} ./ ~/.claude/plugins/marketplaces/thedotmack/`,
-    { stdio: 'inherit' }
-  );
+  syncDirectories(rootDir, INSTALLED_PATH, mainExcludes);
 
   console.log('Running bun install in marketplace...');
-  execSync(
-    'cd ~/.claude/plugins/marketplaces/thedotmack/ && bun install',
-    { stdio: 'inherit' }
-  );
+  execSync('bun install', { cwd: INSTALLED_PATH, stdio: 'inherit' });
 
   // Sync to cache folder with version
   const version = getPluginVersion();
   const CACHE_VERSION_PATH = path.join(CACHE_BASE_PATH, version);
 
   const pluginDir = path.join(rootDir, 'plugin');
-  const pluginGitignoreExcludes = getGitignoreExcludes(pluginDir);
+  const pluginGitignorePatterns = getGitignorePatterns(pluginDir);
+  const cacheExcludes = ['.git', ...pluginGitignorePatterns];
 
   console.log(`Syncing to cache folder (version ${version})...`);
-  execSync(
-    `rsync -av --delete --exclude=.git ${pluginGitignoreExcludes} plugin/ "${CACHE_VERSION_PATH}/"`,
-    { stdio: 'inherit' }
-  );
+  syncDirectories(pluginDir, CACHE_VERSION_PATH, cacheExcludes);
 
   // Install dependencies in cache directory so worker can resolve them
   console.log(`Running bun install in cache folder (version ${version})...`);
