@@ -231,13 +231,26 @@ export class KnowledgeAgent {
       signal?: AbortSignal;
     }) => {
       const useCmdWrapper = process.platform === 'win32' && spawnOptions.command.endsWith('.cmd');
+
+      // Debug: log spawn command and args
+      logger.info('WORKER', 'KnowledgeAgent spawn', {
+        command: spawnOptions.command,
+        args: spawnOptions.args?.slice(0, 5), // Only log first 5 args to avoid noise
+        cwd: spawnOptions.cwd,
+        useCmdWrapper,
+        envKeys: spawnOptions.env ? Object.keys(spawnOptions.env).filter(k =>
+          k.includes('CLAUDE') || k.includes('ANTHROPIC') || k.includes('OPENAI') || k.includes('GEMINI')
+        ) : []
+      });
+
       const child = useCmdWrapper
-        ? spawn('cmd.exe', ['/d', '/c', spawnOptions.command, ...spawnOptions.args], {
+        ? spawn(spawnOptions.command, spawnOptions.args, {
             cwd: spawnOptions.cwd,
             env: spawnOptions.env,
             stdio: ['pipe', 'pipe', 'pipe'],
             signal: spawnOptions.signal,
-            windowsHide: true
+            windowsHide: true,
+            shell: true
           })
         : spawn(spawnOptions.command, spawnOptions.args, {
             cwd: spawnOptions.cwd,
@@ -246,6 +259,19 @@ export class KnowledgeAgent {
             signal: spawnOptions.signal,
             windowsHide: true
           });
+
+      // Capture stderr for debugging
+      let stderrData = '';
+      if (child.stderr) {
+        child.stderr.on('data', (data: Buffer) => {
+          stderrData += data.toString();
+        });
+        child.on('close', (code: number | null) => {
+          if (code !== 0 && stderrData) {
+            logger.error('WORKER', `KnowledgeAgent process stderr (exit ${code})`, { stderr: stderrData.slice(0, 1000) });
+          }
+        });
+      }
 
       return {
         stdin: child.stdin,

@@ -22,9 +22,16 @@ import { MARKETPLACE_ROOT } from '../../shared/paths.js';
 async function httpRequestToWorker(
   port: number,
   endpointPath: string,
-  method: string = 'GET'
+  method: string = 'GET',
+  timeoutMs: number = 3000
 ): Promise<{ ok: boolean; statusCode: number; body: string }> {
-  const response = await fetch(`http://127.0.0.1:${port}${endpointPath}`, { method });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const response = await fetch(`http://127.0.0.1:${port}${endpointPath}`, {
+    method,
+    signal: controller.signal,
+  });
+  clearTimeout(timeout);
   // Gracefully handle cases where response body isn't available (e.g., test mocks)
   let body = '';
   try {
@@ -51,8 +58,8 @@ export async function isPortInUse(port: number): Promise<boolean> {
     // race remains on Windows but is an accepted limitation — the atomic
     // socket approach would cause false positives or UAC popups.
     try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`);
-      return response.ok;
+      const result = await httpRequestToWorker(port, '/api/health', 'GET', 1000);
+      return result.ok;
     } catch {
       return false;
     }
@@ -137,7 +144,7 @@ export async function waitForPortFree(port: number, timeoutMs: number = 10000): 
  */
 export async function httpShutdown(port: number): Promise<boolean> {
   try {
-    const result = await httpRequestToWorker(port, '/api/admin/shutdown', 'POST');
+    const result = await httpRequestToWorker(port, '/api/admin/shutdown', 'POST', 1500);
     if (!result.ok) {
       logger.warn('SYSTEM', 'Shutdown request returned error', { status: result.statusCode });
       return false;

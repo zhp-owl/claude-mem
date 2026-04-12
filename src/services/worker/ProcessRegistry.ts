@@ -389,12 +389,13 @@ export function createPidCapturingSpawn(sessionDbId: number) {
     const env = sanitizeEnv(spawnOptions.env ?? process.env);
 
     const child = useCmdWrapper
-      ? spawn('cmd.exe', ['/d', '/c', spawnOptions.command, ...spawnOptions.args], {
+      ? spawn(spawnOptions.command, spawnOptions.args, {
           cwd: spawnOptions.cwd,
           env,
           stdio: ['pipe', 'pipe', 'pipe'],
           signal: spawnOptions.signal,
-          windowsHide: true
+          windowsHide: true,
+          shell: true
         })
       : spawn(spawnOptions.command, spawnOptions.args, {
           cwd: spawnOptions.cwd,

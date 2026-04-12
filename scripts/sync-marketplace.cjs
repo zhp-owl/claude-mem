@@ -14,6 +14,10 @@ const os = require('os');
 const INSTALLED_PATH = path.join(os.homedir(), '.claude', 'plugins', 'marketplaces', 'thedotmack');
 const CACHE_BASE_PATH = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'thedotmack', 'claude-mem');
 
+function logConst(name, value) {
+  console.log(`[const] ${name}:`, value);
+}
+
 function getCurrentBranch() {
   try {
     if (!existsSync(path.join(INSTALLED_PATH, '.git'))) {
@@ -129,6 +133,11 @@ function syncDirectories(src, dest, excludePatterns = []) {
 const branch = getCurrentBranch();
 const isForce = process.argv.includes('--force');
 
+logConst('INSTALLED_PATH', INSTALLED_PATH);
+logConst('CACHE_BASE_PATH', CACHE_BASE_PATH);
+logConst('branch', branch);
+logConst('isForce', isForce);
+
 if (branch && branch !== 'main' && !isForce) {
   console.log('');
   console.log('\x1b[33m%s\x1b[0m', `WARNING: Installed plugin is on beta branch: ${branch}`);
@@ -147,6 +156,8 @@ function getPluginVersion() {
   try {
     const pluginJsonPath = path.join(__dirname, '..', 'plugin', '.claude-plugin', 'plugin.json');
     const pluginJson = JSON.parse(readFileSync(pluginJsonPath, 'utf-8'));
+    logConst('pluginJsonPath', pluginJsonPath);
+    logConst('pluginJson.version', pluginJson.version);
     return pluginJson.version;
   } catch (error) {
     console.error('\x1b[31m%s\x1b[0m', 'Failed to read plugin version:', error.message);
@@ -161,6 +172,10 @@ try {
   const gitignorePatterns = getGitignorePatterns(rootDir);
   const mainExcludes = ['.git', 'bun.lock', 'package-lock.json', ...gitignorePatterns];
 
+  logConst('rootDir', rootDir);
+  logConst('gitignorePatterns', gitignorePatterns);
+  logConst('mainExcludes', mainExcludes);
+
   syncDirectories(rootDir, INSTALLED_PATH, mainExcludes);
 
   console.log('Running bun install in marketplace...');
@@ -169,10 +184,16 @@ try {
   // Sync to cache folder with version
   const version = getPluginVersion();
   const CACHE_VERSION_PATH = path.join(CACHE_BASE_PATH, version);
+  logConst('version', version);
+  logConst('CACHE_VERSION_PATH', CACHE_VERSION_PATH);
 
   const pluginDir = path.join(rootDir, 'plugin');
   const pluginGitignorePatterns = getGitignorePatterns(pluginDir);
   const cacheExcludes = ['.git', ...pluginGitignorePatterns];
+
+  logConst('pluginDir', pluginDir);
+  logConst('pluginGitignorePatterns', pluginGitignorePatterns);
+  logConst('cacheExcludes', cacheExcludes);
 
   console.log(`Syncing to cache folder (version ${version})...`);
   syncDirectories(pluginDir, CACHE_VERSION_PATH, cacheExcludes);
