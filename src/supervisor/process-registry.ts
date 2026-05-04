@@ -1,8 +1,9 @@
-import { ChildProcess } from 'child_process';
+import { ChildProcess, spawn, spawnSync } from 'child_process';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { homedir } from 'os';
 import path from 'path';
 import { logger } from '../utils/logger.js';
+import { sanitizeEnv } from './env-sanitizer.js';
 
 const REAP_SESSION_SIGTERM_TIMEOUT_MS = 5_000;
 const REAP_SESSION_SIGKILL_TIMEOUT_MS = 1_000;
@@ -15,6 +16,7 @@ export interface ManagedProcessInfo {
   type: string;
   sessionId?: string | number;
   startedAt: string;
+  pgid?: number;
 }
 
 export interface ManagedProcessRecord extends ManagedProcessInfo {
@@ -33,9 +35,84 @@ export function isPidAlive(pid: number): boolean {
     process.kill(pid, 0);
     return true;
   } catch (error: unknown) {
-    const code = (error as NodeJS.ErrnoException).code;
-    return code === 'EPERM';
+    if (error instanceof Error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPERM') return true;
+      logger.debug('SYSTEM', 'PID check failed', { pid, code });
+      return false;
+    }
+    logger.warn('SYSTEM', 'PID check threw non-Error', { pid, error: String(error) });
+    return false;
   }
+}
+
+export interface PidInfo {
+  pid: number;
+  port: number;
+  startedAt: string;
+  startToken?: string;
+}
+
+export function captureProcessStartToken(pid: number): string | null {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+
+  if (process.platform === 'linux') {
+    try {
+      const raw = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+      const tailStart = raw.lastIndexOf(') ');
+      if (tailStart < 0) return null;
+      const fields = raw.slice(tailStart + 2).split(' ');
+      const starttime = fields[19];
+      return starttime && /^\d+$/.test(starttime) ? starttime : null;
+    } catch (error: unknown) {
+      logger.debug('SYSTEM', 'captureProcessStartToken: /proc read failed', {
+        pid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return null;
+    }
+  }
+
+  if (process.platform === 'win32') {
+    return null;
+  }
+
+  try {
+    const result = spawnSync('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf-8',
+      timeout: 2000,
+      env: { ...process.env, LC_ALL: 'C', LANG: 'C' }
+    });
+    if (result.status !== 0) return null;
+    const token = result.stdout.trim();
+    return token.length > 0 ? token : null;
+  } catch (error: unknown) {
+    logger.debug('SYSTEM', 'captureProcessStartToken: ps exec failed', {
+      pid,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return null;
+  }
+}
+
+export function verifyPidFileOwnership(info: PidInfo | null): info is PidInfo {
+  if (!info) return false;
+  if (!isPidAlive(info.pid)) return false;
+
+  if (!info.startToken) return true;
+
+  const currentToken = captureProcessStartToken(info.pid);
+  if (currentToken === null) return true;
+
+  const match = currentToken === info.startToken;
+  if (!match) {
+    logger.debug('SYSTEM', 'verifyPidFileOwnership: start-token mismatch (PID reused)', {
+      pid: info.pid,
+      stored: info.startToken,
+      current: currentToken
+    });
+  }
+  return match;
 }
 
 export class ProcessRegistry {
@@ -65,10 +142,17 @@ export class ProcessRegistry {
       for (const [id, info] of Object.entries(processes)) {
         this.entries.set(id, info);
       }
-    } catch (error) {
-      logger.warn('SYSTEM', 'Failed to parse supervisor registry, rebuilding', {
-        path: this.registryPath
-      }, error as Error);
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        logger.warn('SYSTEM', 'Failed to parse supervisor registry, rebuilding', {
+          path: this.registryPath
+        }, error);
+      } else {
+        logger.warn('SYSTEM', 'Failed to parse supervisor registry, rebuilding', {
+          path: this.registryPath,
+          error: String(error)
+        });
+      }
       this.entries.clear();
     }
 
@@ -143,11 +227,6 @@ export class ProcessRegistry {
     return removed;
   }
 
-  /**
-   * Kill and unregister all processes tagged with the given sessionId.
-   * Sends SIGTERM first, waits up to 5s, then SIGKILL for survivors.
-   * Called when a session is deleted to prevent leaked child processes (#1351).
-   */
   async reapSession(sessionId: string | number): Promise<number> {
     this.initialize();
 
@@ -162,22 +241,33 @@ export class ProcessRegistry {
       pids: sessionRecords.map(r => r.pid)
     });
 
-    // Phase 1: SIGTERM all alive processes
     const aliveRecords = sessionRecords.filter(r => isPidAlive(r.pid));
     for (const record of aliveRecords) {
       try {
-        process.kill(record.pid, 'SIGTERM');
+        if (typeof record.pgid === 'number' && process.platform !== 'win32') {
+          process.kill(-record.pgid, 'SIGTERM');
+        } else {
+          process.kill(record.pid, 'SIGTERM');
+        }
       } catch (error: unknown) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== 'ESRCH') {
-          logger.debug('SYSTEM', `Failed to SIGTERM session process PID ${record.pid}`, {
-            pid: record.pid
-          }, error as Error);
+        if (error instanceof Error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ESRCH') {
+            logger.debug('SYSTEM', `Failed to SIGTERM session process PID ${record.pid}`, {
+              pid: record.pid,
+              pgid: record.pgid
+            }, error);
+          }
+        } else {
+          logger.warn('SYSTEM', `Failed to SIGTERM session process PID ${record.pid} (non-Error)`, {
+            pid: record.pid,
+            pgid: record.pgid,
+            error: String(error)
+          });
         }
       }
     }
 
-    // Phase 2: Wait for processes to exit
     const deadline = Date.now() + REAP_SESSION_SIGTERM_TIMEOUT_MS;
     while (Date.now() < deadline) {
       const survivors = aliveRecords.filter(r => isPidAlive(r.pid));
@@ -185,26 +275,38 @@ export class ProcessRegistry {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
 
-    // Phase 3: SIGKILL any survivors
     const survivors = aliveRecords.filter(r => isPidAlive(r.pid));
     for (const record of survivors) {
       logger.warn('SYSTEM', `Session process PID ${record.pid} did not exit after SIGTERM, sending SIGKILL`, {
         pid: record.pid,
+        pgid: record.pgid,
         sessionId: sessionIdNum
       });
       try {
-        process.kill(record.pid, 'SIGKILL');
+        if (typeof record.pgid === 'number' && process.platform !== 'win32') {
+          process.kill(-record.pgid, 'SIGKILL');
+        } else {
+          process.kill(record.pid, 'SIGKILL');
+        }
       } catch (error: unknown) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== 'ESRCH') {
-          logger.debug('SYSTEM', `Failed to SIGKILL session process PID ${record.pid}`, {
-            pid: record.pid
-          }, error as Error);
+        if (error instanceof Error) {
+          const code = (error as NodeJS.ErrnoException).code;
+          if (code !== 'ESRCH') {
+            logger.debug('SYSTEM', `Failed to SIGKILL session process PID ${record.pid}`, {
+              pid: record.pid,
+              pgid: record.pgid
+            }, error);
+          }
+        } else {
+          logger.warn('SYSTEM', `Failed to SIGKILL session process PID ${record.pid} (non-Error)`, {
+            pid: record.pid,
+            pgid: record.pgid,
+            error: String(error)
+          });
         }
       }
     }
 
-    // Brief wait for SIGKILL to take effect
     if (survivors.length > 0) {
       const sigkillDeadline = Date.now() + REAP_SESSION_SIGKILL_TIMEOUT_MS;
       while (Date.now() < sigkillDeadline) {
@@ -214,7 +316,6 @@ export class ProcessRegistry {
       }
     }
 
-    // Phase 4: Unregister all session records
     for (const record of sessionRecords) {
       this.entries.delete(record.id);
       this.runtimeProcesses.delete(record.id);
@@ -250,4 +351,290 @@ export function getProcessRegistry(): ProcessRegistry {
 
 export function createProcessRegistry(registryPath: string): ProcessRegistry {
   return new ProcessRegistry(registryPath);
+}
+
+export interface TrackedSdkProcess {
+  pid: number;
+  pgid: number | undefined;
+  sessionDbId: number;
+  process: ChildProcess;
+}
+
+export function getSdkProcessForSession(sessionDbId: number): TrackedSdkProcess | undefined {
+  const registry = getProcessRegistry();
+  const matches = registry.getBySession(sessionDbId).filter(r => r.type === 'sdk');
+
+  if (matches.length > 1) {
+    logger.warn('PROCESS', `Multiple SDK processes found for session ${sessionDbId}`, {
+      count: matches.length,
+      pids: matches.map(m => m.pid),
+    });
+  }
+
+  const record = matches[0];
+  if (!record) return undefined;
+
+  const processRef = registry.getRuntimeProcess(record.id);
+  if (!processRef) return undefined;
+
+  return {
+    pid: record.pid,
+    pgid: record.pgid,
+    sessionDbId,
+    process: processRef,
+  };
+}
+
+export async function ensureSdkProcessExit(
+  tracked: TrackedSdkProcess,
+  timeoutMs: number = 5000
+): Promise<void> {
+  const { pid, pgid, process: proc } = tracked;
+
+  if (proc.exitCode !== null) return;
+
+  const exitPromise = new Promise<void>((resolve) => {
+    proc.once('exit', () => resolve());
+  });
+
+  const timeoutPromise = new Promise<void>((resolve) => {
+    setTimeout(resolve, timeoutMs);
+  });
+
+  await Promise.race([exitPromise, timeoutPromise]);
+
+  if (proc.exitCode !== null) return;
+
+  logger.warn('PROCESS', `PID ${pid} did not exit after ${timeoutMs}ms, sending SIGKILL to process group`, {
+    pid, pgid, timeoutMs,
+  });
+  try {
+    if (typeof pgid === 'number' && process.platform !== 'win32') {
+      process.kill(-pgid, 'SIGKILL');
+    } else {
+      proc.kill('SIGKILL');
+    }
+  } catch {
+    // Already dead — fine.
+  }
+
+  const sigkillExit = new Promise<void>((resolve) => {
+    proc.once('exit', () => resolve());
+  });
+  const sigkillTimeout = new Promise<void>((resolve) => {
+    setTimeout(resolve, 1000);
+  });
+  await Promise.race([sigkillExit, sigkillTimeout]);
+}
+
+const TOTAL_PROCESS_HARD_CAP = 10;
+const slotWaiters: Array<() => void> = [];
+
+function getActiveSdkCount(): number {
+  return getProcessRegistry().getAll().filter(record => record.type === 'sdk').length;
+}
+
+function notifySlotAvailable(): void {
+  const waiter = slotWaiters.shift();
+  if (waiter) waiter();
+}
+
+export async function waitForSlot(maxConcurrent: number, timeoutMs: number = 60_000): Promise<void> {
+  const activeCount = getActiveSdkCount();
+  if (activeCount >= TOTAL_PROCESS_HARD_CAP) {
+    throw new Error(`Hard cap exceeded: ${activeCount} processes in registry (cap=${TOTAL_PROCESS_HARD_CAP}). Refusing to spawn more.`);
+  }
+
+  if (activeCount < maxConcurrent) return;
+
+  logger.info('PROCESS', `Pool limit reached (${activeCount}/${maxConcurrent}), waiting for slot...`);
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      const idx = slotWaiters.indexOf(onSlot);
+      if (idx >= 0) slotWaiters.splice(idx, 1);
+      reject(new Error(`Timed out waiting for agent pool slot after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const onSlot = () => {
+      clearTimeout(timeout);
+      if (getActiveSdkCount() < maxConcurrent) {
+        resolve();
+      } else {
+        slotWaiters.push(onSlot);
+      }
+    };
+
+    slotWaiters.push(onSlot);
+  });
+}
+
+export interface SpawnedSdkProcess {
+  stdin: NonNullable<ChildProcess['stdin']>;
+  stdout: NonNullable<ChildProcess['stdout']>;
+  stderr: NonNullable<ChildProcess['stderr']>;
+  readonly killed: boolean;
+  readonly exitCode: number | null;
+  kill: ChildProcess['kill'];
+  on: ChildProcess['on'];
+  once: ChildProcess['once'];
+  off: ChildProcess['off'];
+}
+
+export interface SpawnSdkOptions {
+  command: string;
+  args: string[];
+  cwd?: string;
+  env?: NodeJS.ProcessEnv;
+  signal?: AbortSignal;
+}
+
+export function spawnSdkProcess(
+  sessionDbId: number,
+  options: SpawnSdkOptions
+): { process: SpawnedSdkProcess; pid: number; pgid: number } | null {
+  const registry = getProcessRegistry();
+
+  const useCmdWrapper = process.platform === 'win32' && options.command.endsWith('.cmd');
+  const env = sanitizeEnv(options.env ?? process.env);
+
+  const filteredArgs: string[] = [];
+  for (const arg of options.args) {
+    if (arg === '') {
+      if (filteredArgs.length > 0 && filteredArgs[filteredArgs.length - 1].startsWith('--')) {
+        filteredArgs.pop();
+      }
+      continue;
+    }
+    filteredArgs.push(arg);
+  }
+
+  const isWin = process.platform === 'win32';
+  const child = useCmdWrapper
+    ? spawn('cmd.exe', ['/d', '/c', options.command, ...filteredArgs], {
+        cwd: options.cwd,
+        env,
+        detached: !isWin,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        signal: options.signal,
+        windowsHide: true,
+      })
+    : spawn(options.command, filteredArgs, {
+        cwd: options.cwd,
+        env,
+        detached: !isWin,
+        stdio: ['pipe', 'pipe', 'pipe'],
+        signal: options.signal,
+        windowsHide: true,
+      });
+
+  child.on('error', (err: Error) => {
+    logger.warn('SDK_SPAWN', `[session-${sessionDbId}] child emitted error event`, {
+      sessionDbId,
+      pid: child.pid,
+      errorName: err.name,
+      errorCode: (err as NodeJS.ErrnoException).code,
+    }, err);
+  });
+
+  if (!child.pid) {
+    logger.error('PROCESS', 'Spawn succeeded but produced no PID', { sessionDbId });
+    return null;
+  }
+
+  const pid = child.pid;
+  const pgid = pid; 
+
+  if (child.stderr) {
+    child.stderr.on('data', (data: Buffer) => {
+      logger.debug('SDK_SPAWN', `[session-${sessionDbId}] stderr: ${data.toString().trim()}`);
+    });
+  }
+
+  const recordId = `sdk:${sessionDbId}:${pid}`;
+  registry.register(recordId, {
+    pid,
+    type: 'sdk',
+    sessionId: sessionDbId,
+    startedAt: new Date().toISOString(),
+    pgid,
+  }, child);
+
+  child.on('exit', (code: number | null, signal: string | null) => {
+    if (code !== 0) {
+      logger.warn('SDK_SPAWN', `[session-${sessionDbId}] Claude process exited`, { code, signal, pid });
+    }
+    registry.unregister(recordId);
+    notifySlotAvailable();
+  });
+
+  if (!child.stdin || !child.stdout || !child.stderr) {
+    logger.error('PROCESS', 'Spawned SDK child missing required stdio streams', {
+      sessionDbId,
+      pid,
+      hasStdin: Boolean(child.stdin),
+      hasStdout: Boolean(child.stdout),
+      hasStderr: Boolean(child.stderr),
+    });
+    try { child.kill('SIGKILL'); } catch { /* already dead */ }
+    return null;
+  }
+
+  const spawned: SpawnedSdkProcess = {
+    stdin: child.stdin,
+    stdout: child.stdout,
+    stderr: child.stderr,
+    get killed() { return child.killed; },
+    get exitCode() { return child.exitCode; },
+    kill: child.kill.bind(child),
+    on: child.on.bind(child),
+    once: child.once.bind(child),
+    off: child.off.bind(child),
+  };
+
+  return { process: spawned, pid, pgid };
+}
+
+export function createSdkSpawnFactory(sessionDbId: number) {
+  return (spawnOptions: SpawnSdkOptions): SpawnedSdkProcess => {
+    const registry = getProcessRegistry();
+
+    const existing = registry.getBySession(sessionDbId).filter(r => r.type === 'sdk');
+    for (const record of existing) {
+      if (!isPidAlive(record.pid)) continue;
+      try {
+        if (typeof record.pgid === 'number') {
+          if (process.platform !== 'win32') {
+            process.kill(-record.pgid, 'SIGTERM');
+          } else {
+            process.kill(record.pid, 'SIGTERM');
+          }
+        } else {
+          process.kill(record.pid, 'SIGTERM');
+        }
+        logger.warn('PROCESS', `Killing duplicate SDK process PID ${record.pid} before spawning new one for session ${sessionDbId}`, {
+          existingPid: record.pid,
+          sessionDbId,
+        });
+      } catch (error: unknown) {
+        const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+        if (code !== 'ESRCH') {
+          if (error instanceof Error) {
+            logger.warn('PROCESS', `Failed to SIGTERM duplicate SDK process PID ${record.pid}`, { sessionDbId }, error);
+          } else {
+            logger.warn('PROCESS', `Failed to SIGTERM duplicate SDK process PID ${record.pid} (non-Error)`, {
+              sessionDbId, error: String(error),
+            });
+          }
+        }
+      }
+    }
+
+    const result = spawnSdkProcess(sessionDbId, spawnOptions);
+    if (!result) {
+      throw new Error(`Failed to spawn SDK subprocess for session ${sessionDbId}`);
+    }
+
+    return result.process;
+  };
 }

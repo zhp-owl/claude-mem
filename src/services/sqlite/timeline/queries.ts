@@ -1,17 +1,9 @@
-/**
- * Timeline query functions
- * Provides time-based context queries for observations, sessions, and prompts
- *
- * grep-friendly: getTimelineAroundTimestamp, getTimelineAroundObservation, getAllProjects
- */
 
 import type { Database } from 'bun:sqlite';
 import type { ObservationRecord, SessionSummaryRecord, UserPromptRecord } from '../../../types/database.js';
 import { logger } from '../../../utils/logger.js';
+import { OBSERVER_SESSIONS_PROJECT } from '../../../shared/paths.js';
 
-/**
- * Timeline result containing observations, sessions, and prompts within a time window
- */
 export interface TimelineResult {
   observations: ObservationRecord[];
   sessions: Array<{
@@ -35,17 +27,6 @@ export interface TimelineResult {
   }>;
 }
 
-/**
- * Get timeline around a specific timestamp
- * Convenience wrapper that delegates to getTimelineAroundObservation with null anchor
- *
- * @param db Database connection
- * @param anchorEpoch Epoch timestamp to anchor the query around
- * @param depthBefore Number of records to retrieve before anchor (any type)
- * @param depthAfter Number of records to retrieve after anchor (any type)
- * @param project Optional project filter
- * @returns Object containing observations, sessions, and prompts for the specified window
- */
 export function getTimelineAroundTimestamp(
   db: Database,
   anchorEpoch: number,
@@ -56,18 +37,6 @@ export function getTimelineAroundTimestamp(
   return getTimelineAroundObservation(db, null, anchorEpoch, depthBefore, depthAfter, project);
 }
 
-/**
- * Get timeline around a specific observation ID
- * Uses observation ID offsets to determine time boundaries, then fetches all record types in that window
- *
- * @param db Database connection
- * @param anchorObservationId Observation ID to anchor around (null for timestamp-based)
- * @param anchorEpoch Epoch timestamp fallback or anchor for timestamp-based queries
- * @param depthBefore Number of records to retrieve before anchor
- * @param depthAfter Number of records to retrieve after anchor
- * @param project Optional project filter
- * @returns Object containing observations, sessions, and prompts for the specified window
- */
 export function getTimelineAroundObservation(
   db: Database,
   anchorObservationId: number | null,
@@ -83,7 +52,6 @@ export function getTimelineAroundObservation(
   let endEpoch: number;
 
   if (anchorObservationId !== null) {
-    // Get boundary observations by ID offset
     const beforeQuery = `
       SELECT id, created_at_epoch
       FROM observations
@@ -103,20 +71,18 @@ export function getTimelineAroundObservation(
       const beforeRecords = db.prepare(beforeQuery).all(anchorObservationId, ...projectParams, depthBefore + 1) as Array<{id: number; created_at_epoch: number}>;
       const afterRecords = db.prepare(afterQuery).all(anchorObservationId, ...projectParams, depthAfter + 1) as Array<{id: number; created_at_epoch: number}>;
 
-      // Get the earliest and latest timestamps from boundary observations
       if (beforeRecords.length === 0 && afterRecords.length === 0) {
         return { observations: [], sessions: [], prompts: [] };
       }
 
       startEpoch = beforeRecords.length > 0 ? beforeRecords[beforeRecords.length - 1].created_at_epoch : anchorEpoch;
       endEpoch = afterRecords.length > 0 ? afterRecords[afterRecords.length - 1].created_at_epoch : anchorEpoch;
-    } catch (err: any) {
-      logger.error('DB', 'Error getting boundary observations', undefined, { error: err, project });
+    } catch (err) {
+      const normalizedError = err instanceof Error ? err : new Error(String(err));
+      logger.error('DB', 'Error getting boundary observations', { project }, normalizedError);
       return { observations: [], sessions: [], prompts: [] };
     }
   } else {
-    // For timestamp-based anchors, use time-based boundaries
-    // Get observations to find the time window
     const beforeQuery = `
       SELECT created_at_epoch
       FROM observations
@@ -142,13 +108,13 @@ export function getTimelineAroundObservation(
 
       startEpoch = beforeRecords.length > 0 ? beforeRecords[beforeRecords.length - 1].created_at_epoch : anchorEpoch;
       endEpoch = afterRecords.length > 0 ? afterRecords[afterRecords.length - 1].created_at_epoch : anchorEpoch;
-    } catch (err: any) {
-      logger.error('DB', 'Error getting boundary timestamps', undefined, { error: err, project });
+    } catch (err) {
+      const normalizedError = err instanceof Error ? err : new Error(String(err));
+      logger.error('DB', 'Error getting boundary timestamps', { project }, normalizedError);
       return { observations: [], sessions: [], prompts: [] };
     }
   }
 
-  // Now query ALL record types within the time window
   const obsQuery = `
     SELECT *
     FROM observations
@@ -199,20 +165,15 @@ export function getTimelineAroundObservation(
   };
 }
 
-/**
- * Get all unique projects from the database (for web UI project filter)
- *
- * @param db Database connection
- * @returns Array of unique project names
- */
 export function getAllProjects(db: Database): string[] {
   const stmt = db.prepare(`
     SELECT DISTINCT project
     FROM sdk_sessions
     WHERE project IS NOT NULL AND project != ''
+      AND project != ?
     ORDER BY project ASC
   `);
 
-  const rows = stmt.all() as Array<{ project: string }>;
+  const rows = stmt.all(OBSERVER_SESSIONS_PROJECT) as Array<{ project: string }>;
   return rows.map(row => row.project);
 }

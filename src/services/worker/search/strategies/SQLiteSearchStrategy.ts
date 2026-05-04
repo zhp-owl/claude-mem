@@ -1,14 +1,3 @@
-/**
- * SQLiteSearchStrategy - Direct SQLite queries for filter-only searches
- *
- * This strategy handles searches without query text (filter-only):
- * - Date range filtering
- * - Project filtering
- * - Type filtering
- * - Concept/file filtering
- *
- * Used when: No query text is provided, or as a fallback when Chroma fails
- */
 
 import { BaseSearchStrategy, SearchStrategy } from './SearchStrategy.js';
 import {
@@ -30,8 +19,6 @@ export class SQLiteSearchStrategy extends BaseSearchStrategy implements SearchSt
   }
 
   canHandle(options: StrategySearchOptions): boolean {
-    // Can handle filter-only queries (no query text)
-    // Also used as fallback when Chroma is unavailable
     return !options.query || options.strategyHint === 'sqlite';
   }
 
@@ -64,63 +51,54 @@ export class SQLiteSearchStrategy extends BaseSearchStrategy implements SearchSt
       hasProject: !!project
     });
 
+    const obsOptions = searchObservations ? { ...baseOptions, type: obsType, concepts, files } : null;
+
     try {
-      if (searchObservations) {
-        const obsOptions = {
-          ...baseOptions,
-          type: obsType,
-          concepts,
-          files
-        };
-        observations = this.sessionSearch.searchObservations(undefined, obsOptions);
-      }
-
-      if (searchSessions) {
-        sessions = this.sessionSearch.searchSessions(undefined, baseOptions);
-      }
-
-      if (searchPrompts) {
-        prompts = this.sessionSearch.searchUserPrompts(undefined, baseOptions);
-      }
-
-      logger.debug('SEARCH', 'SQLiteSearchStrategy: Results', {
-        observations: observations.length,
-        sessions: sessions.length,
-        prompts: prompts.length
-      });
-
-      return {
-        results: { observations, sessions, prompts },
-        usedChroma: false,
-        fellBack: false,
-        strategy: 'sqlite'
-      };
-
+      return this.executeSqliteSearch(obsOptions, searchSessions, searchPrompts, baseOptions);
     } catch (error) {
-      logger.error('SEARCH', 'SQLiteSearchStrategy: Search failed', {}, error as Error);
+      const errorObj = error instanceof Error ? error : new Error(String(error));
+      logger.error('WORKER', 'SQLiteSearchStrategy: Search failed', {}, errorObj);
       return this.emptyResult('sqlite');
     }
   }
 
-  /**
-   * Find observations by concept (used by findByConcept tool)
-   */
+  private executeSqliteSearch(
+    obsOptions: Record<string, any> | null,
+    searchSessions: boolean,
+    searchPrompts: boolean,
+    baseOptions: Record<string, any>
+  ): StrategySearchResult {
+    let observations: ObservationSearchResult[] = [];
+    let sessions: SessionSummarySearchResult[] = [];
+    let prompts: UserPromptSearchResult[] = [];
+
+    if (obsOptions) {
+      observations = this.sessionSearch.searchObservations(undefined, obsOptions);
+    }
+    if (searchSessions) {
+      sessions = this.sessionSearch.searchSessions(undefined, baseOptions);
+    }
+    if (searchPrompts) {
+      prompts = this.sessionSearch.searchUserPrompts(undefined, baseOptions);
+    }
+
+    return {
+      results: { observations, sessions, prompts },
+      usedChroma: false,
+      strategy: 'sqlite'
+    };
+  }
+
   findByConcept(concept: string, options: StrategySearchOptions): ObservationSearchResult[] {
     const { limit = SEARCH_CONSTANTS.DEFAULT_LIMIT, project, dateRange, orderBy = 'date_desc' } = options;
     return this.sessionSearch.findByConcept(concept, { limit, project, dateRange, orderBy });
   }
 
-  /**
-   * Find observations by type (used by findByType tool)
-   */
   findByType(type: string | string[], options: StrategySearchOptions): ObservationSearchResult[] {
     const { limit = SEARCH_CONSTANTS.DEFAULT_LIMIT, project, dateRange, orderBy = 'date_desc' } = options;
     return this.sessionSearch.findByType(type as any, { limit, project, dateRange, orderBy });
   }
 
-  /**
-   * Find observations and sessions by file path (used by findByFile tool)
-   */
   findByFile(filePath: string, options: StrategySearchOptions): {
     observations: ObservationSearchResult[];
     sessions: SessionSummarySearchResult[];

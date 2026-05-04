@@ -34,12 +34,22 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
     }
 
     try {
-      await signalProcess(record.pid, 'SIGTERM');
-    } catch (error) {
-      logger.debug('SYSTEM', 'Failed to send SIGTERM to child process', {
-        pid: record.pid,
-        type: record.type
-      }, error as Error);
+      await signalProcess(record, 'SIGTERM');
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', 'Failed to send SIGTERM to child process', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type
+        }, error);
+      } else {
+        logger.warn('SYSTEM', 'Failed to send SIGTERM to child process (non-Error)', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type,
+          error: String(error)
+        });
+      }
     }
   }
 
@@ -48,12 +58,22 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
   const survivors = childRecords.filter(record => isPidAlive(record.pid));
   for (const record of survivors) {
     try {
-      await signalProcess(record.pid, 'SIGKILL');
-    } catch (error) {
-      logger.debug('SYSTEM', 'Failed to force kill child process', {
-        pid: record.pid,
-        type: record.type
-      }, error as Error);
+      await signalProcess(record, 'SIGKILL');
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        logger.debug('SYSTEM', 'Failed to force kill child process', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type
+        }, error);
+      } else {
+        logger.warn('SYSTEM', 'Failed to force kill child process (non-Error)', {
+          pid: record.pid,
+          pgid: record.pgid,
+          type: record.type,
+          error: String(error)
+        });
+      }
     }
   }
 
@@ -68,8 +88,15 @@ export async function runShutdownCascade(options: ShutdownCascadeOptions): Promi
 
   try {
     rmSync(pidFilePath, { force: true });
-  } catch (error) {
-    logger.debug('SYSTEM', 'Failed to remove PID file during shutdown', { pidFilePath }, error as Error);
+  } catch (error: unknown) {
+    if (error instanceof Error) {
+      logger.debug('SYSTEM', 'Failed to remove PID file during shutdown', { pidFilePath }, error);
+    } else {
+      logger.warn('SYSTEM', 'Failed to remove PID file during shutdown (non-Error)', {
+        pidFilePath,
+        error: String(error)
+      });
+    }
   }
 
   options.registry.pruneDeadEntries();
@@ -87,62 +114,72 @@ async function waitForExit(records: ManagedProcessRecord[], timeoutMs: number): 
   }
 }
 
-async function signalProcess(pid: number, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
-  if (signal === 'SIGTERM') {
+async function signalProcess(record: ManagedProcessRecord, signal: 'SIGTERM' | 'SIGKILL'): Promise<void> {
+  const { pid, pgid } = record;
+
+  if (process.platform !== 'win32') {
     try {
-      process.kill(pid, signal);
-    } catch (error) {
-      const errno = (error as NodeJS.ErrnoException).code;
-      if (errno === 'ESRCH') {
-        return;
+      if (typeof pgid === 'number') {
+        process.kill(-pgid, signal);
+      } else {
+        process.kill(pid, signal);
+      }
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === 'ESRCH') {
+          return;
+        }
       }
       throw error;
     }
     return;
   }
 
-  if (process.platform === 'win32') {
-    const treeKill = await loadTreeKill();
-    if (treeKill) {
-      await new Promise<void>((resolve, reject) => {
-        treeKill(pid, signal, (error) => {
-          if (!error) {
-            resolve();
-            return;
-          }
+  if (signal === 'SIGTERM') {
+    try {
+      process.kill(pid, signal);
+    } catch (error: unknown) {
+      if (error instanceof Error) {
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === 'ESRCH') {
+          return;
+        }
+      }
+      throw error;
+    }
+    return;
+  }
 
-          const errno = (error as NodeJS.ErrnoException).code;
-          if (errno === 'ESRCH') {
-            resolve();
-            return;
-          }
-          reject(error);
-        });
+  const treeKill = await loadTreeKill();
+  if (treeKill) {
+    await new Promise<void>((resolve, reject) => {
+      treeKill(pid, signal, (error) => {
+        if (!error) {
+          resolve();
+          return;
+        }
+
+        const errno = (error as NodeJS.ErrnoException).code;
+        if (errno === 'ESRCH') {
+          resolve();
+          return;
+        }
+        reject(error);
       });
-      return;
-    }
-
-    const args = ['/PID', String(pid), '/T'];
-    if (signal === 'SIGKILL') {
-      args.push('/F');
-    }
-
-    await execFileAsync('taskkill', args, {
-      timeout: HOOK_TIMEOUTS.POWERSHELL_COMMAND,
-      windowsHide: true
     });
     return;
   }
 
-  try {
-    process.kill(pid, signal);
-  } catch (error) {
-    const errno = (error as NodeJS.ErrnoException).code;
-    if (errno === 'ESRCH') {
-      return;
-    }
-    throw error;
+  const args = ['/PID', String(pid), '/T'];
+  if (signal === 'SIGKILL') {
+    args.push('/F');
   }
+
+  await execFileAsync('taskkill', args, {
+    timeout: HOOK_TIMEOUTS.POWERSHELL_COMMAND,
+    windowsHide: true
+  });
 }
 
 async function loadTreeKill(): Promise<TreeKillFn | null> {
@@ -151,7 +188,8 @@ async function loadTreeKill(): Promise<TreeKillFn | null> {
   try {
     const treeKillModule = await import(moduleName);
     return (treeKillModule.default ?? treeKillModule) as TreeKillFn;
-  } catch {
+  } catch (error: unknown) {
+    logger.debug('SYSTEM', 'tree-kill module not available, using fallback', {}, error instanceof Error ? error : undefined);
     return null;
   }
 }

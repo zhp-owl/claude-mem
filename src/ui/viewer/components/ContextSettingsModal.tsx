@@ -12,7 +12,6 @@ interface ContextSettingsModalProps {
   saveStatus: string;
 }
 
-// Collapsible section component
 function CollapsibleSection({
   title,
   description,
@@ -54,7 +53,6 @@ function CollapsibleSection({
   );
 }
 
-// Form field with optional tooltip
 function FormField({
   label,
   tooltip,
@@ -83,7 +81,6 @@ function FormField({
   );
 }
 
-// Toggle switch component
 function ToggleSwitch({
   id,
   label,
@@ -130,12 +127,10 @@ export function ContextSettingsModal({
 }: ContextSettingsModalProps) {
   const [formState, setFormState] = useState<Settings>(settings);
 
-  // Update form state when settings prop changes
   useEffect(() => {
     setFormState(settings);
   }, [settings]);
 
-  // Get context preview based on current form state
   const {
     preview,
     isLoading,
@@ -163,7 +158,6 @@ export function ContextSettingsModal({
     updateSetting(key, newValue);
   }, [formState, updateSetting]);
 
-  // Handle ESC key
   useEffect(() => {
     const handleEsc = (e: KeyboardEvent) => {
       if (e.key === 'Escape') onClose();
@@ -346,7 +340,7 @@ export function ContextSettingsModal({
                   <option value="claude">Claude (uses your Claude account)</option>
                   <option value="gemini">Gemini (uses API key)</option>
                   <option value="openrouter">OpenRouter (multi-model)</option>
-                  <option value="openai">OpenAI (GPT models)</option>
+                  <option value="openai">OpenAI (uses API key)</option>
                 </select>
               </FormField>
 
@@ -468,7 +462,7 @@ export function ContextSettingsModal({
                   </FormField>
                   <FormField
                     label="OpenAI Model"
-                    tooltip="OpenAI model used for generating observations (e.g., gpt-4o-mini, gpt-4o)"
+                    tooltip="OpenAI model used for generating observations"
                   >
                     <input
                       type="text"
@@ -479,11 +473,11 @@ export function ContextSettingsModal({
                   </FormField>
                   <FormField
                     label="Base URL (Optional)"
-                    tooltip="Override the API base URL, e.g., for Azure OpenAI or compatible proxies"
+                    tooltip="Override the OpenAI API base URL (for Azure or proxy endpoints)"
                   >
                     <input
                       type="text"
-                      value={formState.CLAUDE_MEM_OPENAI_BASE_URL || ''}
+                      value={formState.CLAUDE_MEM_OPENAI_BASE_URL || 'https://api.openai.com/v1'}
                       onChange={(e) => updateSetting('CLAUDE_MEM_OPENAI_BASE_URL', e.target.value)}
                       placeholder="https://api.openai.com/v1"
                     />

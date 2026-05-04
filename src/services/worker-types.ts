@@ -1,17 +1,7 @@
-/**
- * Shared types for Worker Service architecture
- */
 
 import type { Response } from 'express';
+import type { RestartGuard } from './worker/RestartGuard.js';
 
-// ============================================================================
-// Active Session Types
-// ============================================================================
-
-/**
- * Provider-agnostic conversation message for shared history
- * Used to maintain context across Claude↔Gemini provider switches
- */
 export interface ConversationMessage {
   role: 'user' | 'assistant';
   content: string;
@@ -19,30 +9,32 @@ export interface ConversationMessage {
 
 export interface ActiveSession {
   sessionDbId: number;
-  contentSessionId: string;      // User's Claude Code session being observed
-  memorySessionId: string | null; // Memory agent's session ID for resume
+  contentSessionId: string;      
+  memorySessionId: string | null; 
   project: string;
   platformSource: string;
   userPrompt: string;
-  pendingMessages: PendingMessage[];  // Deprecated: now using persistent store, kept for compatibility
+  pendingMessages: PendingMessage[];  
   abortController: AbortController;
   generatorPromise: Promise<void> | null;
   lastPromptNumber: number;
   startTime: number;
-  cumulativeInputTokens: number;   // Track input tokens for discovery cost
-  cumulativeOutputTokens: number;  // Track output tokens for discovery cost
-  earliestPendingTimestamp: number | null;  // Original timestamp of earliest pending message (for accurate observation timestamps)
-  conversationHistory: ConversationMessage[];  // Shared conversation history for provider switching
-  currentProvider: 'claude' | 'gemini' | 'openrouter' | null;  // Track which provider is currently running
-  consecutiveRestarts: number;  // Track consecutive restart attempts to prevent infinite loops
-  forceInit?: boolean;  // Force fresh SDK session (skip resume)
-  idleTimedOut?: boolean;  // Set when session exits due to idle timeout (prevents restart loop)
-  lastGeneratorActivity: number;  // Timestamp of last generator progress (for stale detection, Issue #1099)
-  // CLAIM-CONFIRM FIX: Track IDs of messages currently being processed
-  // These IDs will be confirmed (deleted) after successful storage
-  processingMessageIds: number[];
-  // Tier routing: model override per session based on queue complexity
+  cumulativeInputTokens: number;   
+  cumulativeOutputTokens: number;  
+  earliestPendingTimestamp: number | null;  
+  conversationHistory: ConversationMessage[];  
+  currentProvider: 'claude' | 'gemini' | 'openrouter' | null;  
+  consecutiveRestarts: number;  
+  restartGuard?: RestartGuard;
+  forceInit?: boolean;  
+  idleTimedOut?: boolean;  
+  lastGeneratorActivity: number;
   modelOverride?: string;
+  lastSummaryStored?: boolean;
+  pendingAgentId?: string | null;
+  pendingAgentType?: string | null;
+  abortReason?: 'idle' | 'shutdown' | 'overflow' | 'restart-guard' | null;
+  respawnTimer?: ReturnType<typeof setTimeout>;
 }
 
 export interface PendingMessage {
@@ -53,13 +45,11 @@ export interface PendingMessage {
   prompt_number?: number;
   cwd?: string;
   last_assistant_message?: string;
+  agentId?: string;
+  agentType?: string;
+  toolUseId?: string;
 }
 
-/**
- * PendingMessage with database ID for completion tracking.
- * The _persistentId is used to mark the message as processed after SDK success.
- * The _originalTimestamp is the epoch when the message was first queued (for accurate observation timestamps).
- */
 export interface PendingMessageWithId extends PendingMessage {
   _persistentId: number;
   _originalTimestamp: number;
@@ -71,11 +61,10 @@ export interface ObservationData {
   tool_response: any;
   prompt_number: number;
   cwd?: string;
+  agentId?: string;
+  agentType?: string;
+  toolUseId?: string;
 }
-
-// ============================================================================
-// SSE Types
-// ============================================================================
 
 export interface SSEEvent {
   type: string;
@@ -84,10 +73,6 @@ export interface SSEEvent {
 }
 
 export type SSEClient = Response;
-
-// ============================================================================
-// Pagination Types
-// ============================================================================
 
 export interface PaginatedResult<T> {
   items: T[];
@@ -103,24 +88,17 @@ export interface PaginationParams {
   platformSource?: string;
 }
 
-// ============================================================================
-// Settings Types
-// ============================================================================
-
 export interface ViewerSettings {
   sidebarOpen: boolean;
   selectedProject: string | null;
   theme: 'light' | 'dark' | 'system';
 }
 
-// ============================================================================
-// Database Record Types
-// ============================================================================
-
 export interface Observation {
   id: number;
-  memory_session_id: string;  // Renamed from sdk_session_id
+  memory_session_id: string;  
   project: string;
+  merged_into_project: string | null;
   platform_source: string;
   type: string;
   title: string;
@@ -138,7 +116,7 @@ export interface Observation {
 
 export interface Summary {
   id: number;
-  session_id: string; // content_session_id (from JOIN)
+  session_id: string; 
   project: string;
   platform_source: string;
   request: string | null;
@@ -153,8 +131,8 @@ export interface Summary {
 
 export interface UserPrompt {
   id: number;
-  content_session_id: string;  // Renamed from claude_session_id
-  project: string; // From JOIN with sdk_sessions
+  content_session_id: string;  
+  project: string; 
   platform_source: string;
   prompt_number: number;
   prompt_text: string;
@@ -164,11 +142,11 @@ export interface UserPrompt {
 
 export interface DBSession {
   id: number;
-  content_session_id: string;    // Renamed from claude_session_id
+  content_session_id: string;    
   project: string;
   platform_source: string;
   user_prompt: string;
-  memory_session_id: string | null;  // Renamed from sdk_session_id
+  memory_session_id: string | null;  
   status: 'active' | 'completed' | 'failed';
   started_at: string;
   started_at_epoch: number;
@@ -176,11 +154,6 @@ export interface DBSession {
   completed_at_epoch: number | null;
 }
 
-// ============================================================================
-// SDK Types
-// ============================================================================
-
-// Re-export the actual SDK type to ensure compatibility
 export type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 
 export interface ParsedObservation {
@@ -200,10 +173,6 @@ export interface ParsedSummary {
   next_steps: string | null;
   notes: string | null;
 }
-
-// ============================================================================
-// Utility Types
-// ============================================================================
 
 export interface DatabaseStats {
   totalObservations: number;

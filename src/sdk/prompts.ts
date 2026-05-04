@@ -1,10 +1,8 @@
-/**
- * SDK Prompts Module
- * Generates prompts for the Claude Agent SDK memory worker
- */
 
 import { logger } from '../utils/logger.js';
 import type { ModeConfig } from '../services/domain/types.js';
+
+export const SUMMARY_MODE_MARKER = 'MODE SWITCH: PROGRESS SUMMARY';
 
 export interface Observation {
   id: number;
@@ -23,9 +21,6 @@ export interface SDKSession {
   last_assistant_message?: string;
 }
 
-/**
- * Build initial prompt to initialize the SDK agent
- */
 export function buildInitPrompt(project: string, sessionId: string, userPrompt: string, mode: ModeConfig): string {
   return `${mode.prompts.system_identity}
 
@@ -85,29 +80,25 @@ ${mode.prompts.footer}
 ${mode.prompts.header_memory_start}`;
 }
 
-/**
- * Build prompt to send tool observation to SDK agent
- */
 export function buildObservationPrompt(obs: Observation): string {
-  // Safely parse tool_input and tool_output - they're already JSON strings
   let toolInput: any;
   let toolOutput: any;
 
   try {
     toolInput = typeof obs.tool_input === 'string' ? JSON.parse(obs.tool_input) : obs.tool_input;
-  } catch (error) {
+  } catch (error: unknown) {
     logger.debug('SDK', 'Tool input is plain string, using as-is', {
       toolName: obs.tool_name
-    }, error as Error);
+    }, error instanceof Error ? error : new Error(String(error)));
     toolInput = obs.tool_input;
   }
 
   try {
     toolOutput = typeof obs.tool_output === 'string' ? JSON.parse(obs.tool_output) : obs.tool_output;
-  } catch (error) {
+  } catch (error: unknown) {
     logger.debug('SDK', 'Tool output is plain string, using as-is', {
       toolName: obs.tool_name
-    }, error as Error);
+    }, error instanceof Error ? error : new Error(String(error)));
     toolOutput = obs.tool_output;
   }
 
@@ -123,9 +114,6 @@ Concrete debugging findings from logs, queue state, database rows, session routi
 Never reply with prose such as "Skipping", "No substantive tool executions", or any explanation outside XML. Non-XML text is discarded.`;
 }
 
-/**
- * Build prompt to generate progress summary
- */
 export function buildSummaryPrompt(session: SDKSession, mode: ModeConfig): string {
   const lastAssistantMessage = session.last_assistant_message || (() => {
     logger.error('SDK', 'Missing last_assistant_message in session for summary prompt', {
@@ -134,9 +122,11 @@ export function buildSummaryPrompt(session: SDKSession, mode: ModeConfig): strin
     return '';
   })();
 
-  return `--- MODE SWITCH: PROGRESS SUMMARY ---
-Do NOT output <observation> tags. This is a summary request, not an observation request.
-Your response MUST use <summary> tags ONLY. Any <observation> output will be discarded.
+  return `--- ${SUMMARY_MODE_MARKER} ---
+⚠️ CRITICAL TAG REQUIREMENT — READ CAREFULLY:
+• You MUST wrap your ENTIRE response in <summary>...</summary> tags.
+• Do NOT use <observation> tags. <observation> output will be DISCARDED and cause a system error.
+• The ONLY accepted root tag is <summary>. Any other root tag is a protocol violation.
 
 ${mode.prompts.header_summary_checkpoint}
 ${mode.prompts.summary_instruction}
@@ -154,30 +144,10 @@ ${mode.prompts.summary_format_instruction}
   <notes>${mode.prompts.xml_summary_notes_placeholder}</notes>
 </summary>
 
+REMINDER: Your response MUST use <summary> as the root tag, NOT <observation>.
 ${mode.prompts.summary_footer}`;
 }
 
-/**
- * Build prompt for continuation of existing session
- *
- * CRITICAL: Why contentSessionId Parameter is Required
- * ====================================================
- * This function receives contentSessionId from SDKAgent.ts, which comes from:
- * - SessionManager.initializeSession (fetched from database)
- * - SessionStore.createSDKSession (stored by new-hook.ts)
- * - new-hook.ts receives it from Claude Code's hook context
- *
- * The contentSessionId is the SAME session_id used by:
- * - NEW hook (to create/fetch session)
- * - SAVE hook (to store observations)
- * - This continuation prompt (to maintain session context)
- *
- * This is how everything stays connected - ONE session_id threading through
- * all hooks and prompts in the same conversation.
- *
- * Called when: promptNumber > 1 (see SDKAgent.ts line 150)
- * First prompt: Uses buildInitPrompt instead (promptNumber === 1)
- */
 export function buildContinuationPrompt(userPrompt: string, promptNumber: number, contentSessionId: string, mode: ModeConfig): string {
   return `${mode.prompts.continuation_greeting}
 

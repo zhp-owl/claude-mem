@@ -1,21 +1,10 @@
-/**
- * Runtime command routing for `npx claude-mem start|stop|restart|status|search|transcript`.
- *
- * These commands delegate to the installed plugin's worker-service.cjs via Bun,
- * or hit the worker's HTTP API directly (for `search`).
- *
- * Pure Node.js — no Bun APIs used.
- */
 import { spawn } from 'child_process';
 import { existsSync } from 'fs';
 import { join } from 'path';
 import pc from 'picocolors';
 import { resolveBunBinaryPath } from '../utils/bun-resolver.js';
 import { isPluginInstalled, marketplaceDirectory } from '../utils/paths.js';
-
-// ---------------------------------------------------------------------------
-// Installation guard
-// ---------------------------------------------------------------------------
+import { SettingsDefaultsManager } from '../../shared/SettingsDefaultsManager.js';
 
 function ensureInstalledOrExit(): void {
   if (!isPluginInstalled()) {
@@ -24,10 +13,6 @@ function ensureInstalledOrExit(): void {
     process.exit(1);
   }
 }
-
-// ---------------------------------------------------------------------------
-// Bun guard
-// ---------------------------------------------------------------------------
 
 function resolveBunOrExit(): string {
   const bunPath = resolveBunBinaryPath();
@@ -40,17 +25,9 @@ function resolveBunOrExit(): string {
   return bunPath;
 }
 
-// ---------------------------------------------------------------------------
-// Worker-service path
-// ---------------------------------------------------------------------------
-
 function workerServiceScriptPath(): string {
   return join(marketplaceDirectory(), 'plugin', 'scripts', 'worker-service.cjs');
 }
-
-// ---------------------------------------------------------------------------
-// Spawn helper
-// ---------------------------------------------------------------------------
 
 function spawnBunWorkerCommand(command: string, extraArgs: string[] = []): void {
   ensureInstalledOrExit();
@@ -81,10 +58,6 @@ function spawnBunWorkerCommand(command: string, extraArgs: string[] = []): void 
   });
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 export function runStartCommand(): void {
   spawnBunWorkerCommand('start');
 }
@@ -101,9 +74,40 @@ export function runStatusCommand(): void {
   spawnBunWorkerCommand('status');
 }
 
-/**
- * Search the worker API at `GET /api/search?q=<query>`.
- */
+export function runAdoptCommand(extraArgs: string[] = []): void {
+  ensureInstalledOrExit();
+  const bunPath = resolveBunOrExit();
+  const workerScript = workerServiceScriptPath();
+
+  if (!existsSync(workerScript)) {
+    console.error(pc.red(`Worker script not found at: ${workerScript}`));
+    console.error('The installation may be corrupted. Try: npx claude-mem install');
+    process.exit(1);
+  }
+
+  const userCwd = process.cwd();
+  const args = [workerScript, 'adopt', '--cwd', userCwd, ...extraArgs];
+
+  const child = spawn(bunPath, args, {
+    stdio: 'inherit',
+    cwd: marketplaceDirectory(),
+    env: process.env,
+  });
+
+  child.on('error', (error) => {
+    console.error(pc.red(`Failed to start Bun: ${error.message}`));
+    process.exit(1);
+  });
+
+  child.on('close', (exitCode) => {
+    process.exit(exitCode ?? 0);
+  });
+}
+
+export function runCleanupCommand(extraArgs: string[] = []): void {
+  spawnBunWorkerCommand('cleanup', extraArgs);
+}
+
 export async function runSearchCommand(queryParts: string[]): Promise<void> {
   ensureInstalledOrExit();
 
@@ -113,43 +117,50 @@ export async function runSearchCommand(queryParts: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const workerPort = process.env.CLAUDE_MEM_WORKER_PORT || '37777';
-  const searchUrl = `http://127.0.0.1:${workerPort}/api/search?q=${encodeURIComponent(query)}`;
+  const workerPort = SettingsDefaultsManager.get('CLAUDE_MEM_WORKER_PORT');
+  const searchUrl = `http://127.0.0.1:${workerPort}/api/search?query=${encodeURIComponent(query)}`;
 
+  let response: Response;
   try {
-    const response = await fetch(searchUrl);
-
-    if (!response.ok) {
-      if (response.status === 404) {
-        console.error(pc.red('Search endpoint not found. Is the worker running?'));
-        console.error(`Try: ${pc.bold('npx claude-mem start')}`);
-        process.exit(1);
-      }
-      console.error(pc.red(`Search failed: HTTP ${response.status}`));
-      process.exit(1);
-    }
-
-    const data = await response.json();
-
-    if (typeof data === 'object' && data !== null) {
-      console.log(JSON.stringify(data, null, 2));
-    } else {
-      console.log(data);
-    }
-  } catch (error: any) {
-    if (error?.cause?.code === 'ECONNREFUSED' || error?.message?.includes('ECONNREFUSED')) {
+    response = await fetch(searchUrl);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    const cause = error instanceof Error ? (error as any).cause : undefined;
+    if (cause?.code === 'ECONNREFUSED' || message.includes('ECONNREFUSED')) {
       console.error(pc.red('Worker is not running.'));
       console.error(`Start it with: ${pc.bold('npx claude-mem start')}`);
       process.exit(1);
     }
-    console.error(pc.red(`Search failed: ${error.message}`));
+    console.error(pc.red(`Search failed: ${message}`));
     process.exit(1);
+  }
+
+  if (!response.ok) {
+    if (response.status === 404) {
+      console.error(pc.red('Search endpoint not found. Is the worker running?'));
+      console.error(`Try: ${pc.bold('npx claude-mem start')}`);
+      process.exit(1);
+    }
+    console.error(pc.red(`Search failed: HTTP ${response.status}`));
+    process.exit(1);
+  }
+
+  let data: unknown;
+  try {
+    data = await response.json();
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(pc.red(`Search failed: invalid JSON response (${message})`));
+    process.exit(1);
+  }
+
+  if (typeof data === 'object' && data !== null) {
+    console.log(JSON.stringify(data, null, 2));
+  } else {
+    console.log(data);
   }
 }
 
-/**
- * Start the transcript watcher via Bun.
- */
 export function runTranscriptWatchCommand(): void {
   ensureInstalledOrExit();
   const bunPath = resolveBunOrExit();
@@ -162,7 +173,6 @@ export function runTranscriptWatchCommand(): void {
   );
 
   if (!existsSync(transcriptWatcherPath)) {
-    // Fall back to worker-service with transcript subcommand
     spawnBunWorkerCommand('transcript', ['watch']);
     return;
   }
