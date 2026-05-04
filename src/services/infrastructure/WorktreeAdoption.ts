@@ -116,6 +116,12 @@ function listMergedBranches(mainRepo: string): Set<string> {
   );
 }
 
+function requireBunSqlite(): typeof import('bun:sqlite') {
+  // Keep Bun-only module loading dynamic so Node/esbuild bundles do not try to resolve it.
+  const dynamicRequire = eval('require') as NodeJS.Require;
+  return dynamicRequire('bun:sqlite') as typeof import('bun:sqlite');
+}
+
 export async function adoptMergedWorktrees(opts: {
   repoPath?: string;
   dataDirectory?: string;
@@ -181,7 +187,7 @@ export async function adoptMergedWorktrees(opts: {
 
   let db: import('bun:sqlite').Database | null = null;
   try {
-    const { Database } = require('bun:sqlite') as typeof import('bun:sqlite');
+    const { Database } = requireBunSqlite();
     db = new Database(dbPath);
 
     interface ColumnInfo { name: string }

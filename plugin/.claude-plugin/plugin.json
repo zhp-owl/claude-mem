@@ -1,11 +1,11 @@
 {
   "name": "claude-mem",
-  "version": "12.1.0",
+  "version": "12.5.1",
   "description": "Persistent memory system for Claude Code - seamlessly preserve context across sessions",
   "author": {
     "name": "Alex Newman"
   },
-  "repository": "https://github.com/zhp-owl/claude-mem",
+  "repository": "https://github.com/thedotmack/claude-mem",
   "license": "AGPL-3.0",
   "keywords": [
     "memory",

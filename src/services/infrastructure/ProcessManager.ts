@@ -291,6 +291,12 @@ function classifyCwdForRemap(cwd: string): CwdClassification {
   return { kind: 'worktree', project: `${parent}/${leaf}` };
 }
 
+function requireBunSqlite(): typeof import('bun:sqlite') {
+  // Keep Bun-only module loading dynamic so Node/esbuild bundles do not try to resolve it.
+  const dynamicRequire = eval('require') as NodeJS.Require;
+  return dynamicRequire('bun:sqlite') as typeof import('bun:sqlite');
+}
+
 export function runOneTimeCwdRemap(dataDirectory?: string): void {
   const effectiveDataDir = dataDirectory ?? DATA_DIR;
   const markerPath = path.join(effectiveDataDir, CWD_REMAP_MARKER_FILENAME);
@@ -322,7 +328,7 @@ export function runOneTimeCwdRemap(dataDirectory?: string): void {
 }
 
 function executeCwdRemap(dbPath: string, effectiveDataDir: string, markerPath: string): void {
-  const { Database } = require('bun:sqlite') as typeof import('bun:sqlite');
+  const { Database } = requireBunSqlite();
 
   const probe = new Database(dbPath, { readonly: true });
   const hasPending = probe.prepare(
